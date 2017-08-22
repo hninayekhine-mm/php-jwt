@@ -27,7 +27,7 @@ class JWT
      * we want to provide some extra leeway time to
      * account for clock skew.
      */
-    public static $leeway = 0;
+    public static $leeway = 0; 
 
     /**
      * Allow the current timestamp to be specified.
@@ -66,13 +66,18 @@ class JWT
      * @uses jsonDecode
      * @uses urlsafeB64Decode
      */
-    public static function decode($jwt, $key, array $allowed_algs = array())
+    public static function decode($jwt, $key, array $allowed_algs = array(), $jwks_endpoint="")
     {
         $timestamp = is_null(static::$timestamp) ? time() : static::$timestamp;
 
-        if (empty($key)) {
-            throw new InvalidArgumentException('Key may not be empty');
-        }
+        /* 
+        If key is empty, $jwks_endpoint must not be emptied 
+        so that public key can be retrieved from Identity Provider - jwks endpoint. 
+        */
+        if (empty($key) && empty($jwks_endpoint)) {
+            throw new InvalidArgumentException('Key may not be empty when jwks endpoint is empty');
+        }        
+
         $tks = explode('.', $jwt);
         if (count($tks) != 3) {
             throw new UnexpectedValueException('Wrong number of segments');
@@ -108,8 +113,15 @@ class JWT
         }
 
         // Check the signature
-        if (!static::verify("$headb64.$bodyb64", $sig, $key, $header->alg)) {
-            throw new SignatureInvalidException('Signature verification failed');
+        if (empty($key)) {
+            if (!static::verify("$headb64.$bodyb64", $sig, $key, $header->alg, $jwt, $jwks_endpoint)) {
+                throw new SignatureInvalidException('Signature verification failed');
+            }
+        }
+        else {
+            if (!static::verify("$headb64.$bodyb64", $sig, $key, $header->alg)) {
+                throw new SignatureInvalidException('Signature verification failed');
+            }
         }
 
         // Check if the nbf if it is defined. This is the time that the
@@ -218,7 +230,7 @@ class JWT
      *
      * @throws DomainException Invalid Algorithm or OpenSSL failure
      */
-    private static function verify($msg, $signature, $key, $alg)
+    private static function verify($msg, $signature, $key, $alg, $jwt="", $jwks_endpoint)
     {
         if (empty(static::$supported_algs[$alg])) {
             throw new DomainException('Algorithm not supported');
@@ -227,7 +239,11 @@ class JWT
         list($function, $algorithm) = static::$supported_algs[$alg];
         switch($function) {
             case 'openssl':
-                $success = openssl_verify($msg, $signature, $key, $algorithm);
+                if ($jwt == "")
+                    $success = openssl_verify($msg, $signature, $key, $algorithm);
+                else
+                    $success = static::openid_verify($jwt, $jwks_endpoint);
+                    
                 if ($success === 1) {
                     return true;
                 } elseif ($success === 0) {
@@ -375,5 +391,21 @@ class JWT
             return mb_strlen($str, '8bit');
         }
         return strlen($str);
+    }
+
+
+    private static function openid_verify($jwt, $jwks_endpoint)
+    {
+        $oidc = new \OpenIdConnectClient\OpenIdConnectClient();
+        $oidc->setProviderConfigParams([
+            'jwks_uri' => $jwks_endpoint
+        ]);
+
+        $result = $oidc->verifyJwtSignature($jwt);
+
+        if ($result)
+            return 1;
+        else 
+            return 0;
     }
 }
